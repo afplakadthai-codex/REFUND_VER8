@@ -642,16 +642,6 @@ if (!function_exists('bv_order_refund_manual_resend_completed_email')) {
             'actor_role' => (string)$actorRole,
         ]);
 
-        try {
-            bv_order_refund_after_completed((int)$refundId);
-        } catch (Throwable $e) {
-            bv_order_refund_debug_log('refund_manual_resend_hook_failed', [
-                'refund_id' => (int)$refundId,
-                'event' => 'refund.completed',
-                'error' => $e->getMessage(),
-            ]);
-        }
-
         if (!function_exists('bv_refund_queue_notifications')) {
             return [
                 'ok' => false,
@@ -661,9 +651,15 @@ if (!function_exists('bv_order_refund_manual_resend_completed_email')) {
             ];
         }
 
-        try {
+       try {
             $queueResult = bv_refund_queue_notifications((int)$refundId, 'completed', [
                 'manual_resend' => true,
+                'actor_user_id' => (int)$actorUserId,
+                'actor_role' => (string)$actorRole,
+            ]);
+            bv_order_refund_debug_log('manual_resend_completed_email_queued_via_notifications', [
+                'refund_id' => (int)$refundId,
+                'status' => $status,
                 'actor_user_id' => (int)$actorUserId,
                 'actor_role' => (string)$actorRole,
             ]);
