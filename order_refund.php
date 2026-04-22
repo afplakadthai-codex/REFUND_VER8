@@ -579,132 +579,11 @@ if (!function_exists('bv_order_refund_after_completed')) {
 if (!function_exists('bv_order_refund_manual_resend_completed_email')) {
     function bv_order_refund_manual_resend_completed_email(int $refundId, array $actor = []): array
     {
-        if ($refundId <= 0) {
-            return [
-                'ok' => false,
-                'message' => 'Invalid refund ID.',
-                'refund_id' => (int)$refundId,
-                'status' => '',
-            ];
-        }
-
-        try {
-            $refund = bv_order_refund_get_by_id($refundId);
-        } catch (Throwable $e) {
-            return [
-                'ok' => false,
-                'message' => 'Unable to load refund: ' . $e->getMessage(),
-                'refund_id' => (int)$refundId,
-                'status' => '',
-            ];
-        }
-
-        if (!$refund) {
-            return [
-                'ok' => false,
-                'message' => 'Refund not found.',
-                'refund_id' => (int)$refundId,
-                'status' => '',
-            ];
-        }
-
-        $status = strtolower(trim((string)($refund['status'] ?? '')));
-        if (!in_array($status, ['refunded', 'partially_refunded'], true)) {
-            return [
-                'ok' => false,
-                'message' => 'Manual resend is allowed only for refunded or partially_refunded refunds.',
-                'refund_id' => (int)$refundId,
-                'status' => $status,
-            ];
-        }
-
-        $actorUserId = 0;
-        if (isset($actor['user_id']) && is_numeric($actor['user_id'])) {
-            $actorUserId = (int)$actor['user_id'];
-        } elseif (isset($actor['id']) && is_numeric($actor['id'])) {
-            $actorUserId = (int)$actor['id'];
-        } else {
-            $actorUserId = bv_order_refund_current_user_id();
-        }
-
-        $actorRole = '';
-        if (isset($actor['role']) && is_string($actor['role'])) {
-            $actorRole = trim($actor['role']);
-        }
-        if ($actorRole === '') {
-            $actorRole = bv_order_refund_current_user_role();
-        }
-
-        bv_order_refund_debug_log('manual_resend_completed_email_called', [
-            'refund_id' => (int)$refundId,
-            'status' => $status,
-            'actor_user_id' => (int)$actorUserId,
-            'actor_role' => (string)$actorRole,
-        ]);
-
-        if (!function_exists('bv_refund_queue_notifications')) {
-            return [
-                'ok' => false,
-                'message' => 'Completed refund mail helper is unavailable.',
-                'refund_id' => (int)$refundId,
-                'status' => $status,
-            ];
-        }
-
-       try {
-            $queueResult = bv_refund_queue_notifications((int)$refundId, 'completed', [
-                'manual_resend' => true,
-                'actor_user_id' => (int)$actorUserId,
-                'actor_role' => (string)$actorRole,
-            ]);
-            bv_order_refund_debug_log('manual_resend_completed_email_queued_via_notifications', [
-                'refund_id' => (int)$refundId,
-                'status' => $status,
-                'actor_user_id' => (int)$actorUserId,
-                'actor_role' => (string)$actorRole,
-            ]);
-        } catch (Throwable $e) {
-            return [
-                'ok' => false,
-                'message' => 'Manual resend failed: ' . $e->getMessage(),
-                'refund_id' => (int)$refundId,
-                'status' => $status,
-            ];
-        }
-
-        if (!is_array($queueResult)) {
-            return [
-                'ok' => false,
-                'message' => 'Completed refund mail helper returned an invalid response.',
-                'refund_id' => (int)$refundId,
-                'status' => $status,
-            ];
-        }
-
-        if (empty($queueResult['ok'])) {
-            $reason = trim((string)($queueResult['reason'] ?? ''));
-            if ($reason === 'mail_queue_not_available') {
-                $message = 'Mail queue/helper unavailable.';
-            } else {
-                $message = trim((string)($queueResult['message'] ?? ''));
-                if ($message === '') {
-                    $message = $reason !== '' ? $reason : 'Completed refund email was not queued.';
-                }
-            }
-
-            return [
-                'ok' => false,
-                'message' => $message,
-                'refund_id' => (int)$refundId,
-                'status' => $status,
-            ];
-        }
-
         return [
-            'ok' => true,
-            'message' => 'Completed refund email resend queued.',
+            'ok' => false,
+            'message' => 'Manual resend for completed refund email is disabled. Completed email is sent only once after successful refund processing.',
             'refund_id' => (int)$refundId,
-            'status' => $status,
+            'status' => '',
         ];
     }
 }
@@ -1750,7 +1629,12 @@ if (!function_exists('bv_refund_notification_context')) {
             }
         }
 
-        $requestedRefundAmount = bv_order_refund_round_money($refund['requested_refund_amount'] ?? 0);
+       $requestedRefundAmount = bv_order_refund_round_money($refund['requested_refund_amount'] ?? 0);
+        $approvedRefundAmount = bv_order_refund_round_money(
+            $refund['approved_refund_amount']
+            ?? $refund['requested_refund_amount']
+            ?? 0
+        );
         $actualRefundedAmount = bv_order_refund_round_money(
             $refund['actual_refunded_amount']
             ?? $refund['actual_refund_amount']
@@ -1758,12 +1642,23 @@ if (!function_exists('bv_refund_notification_context')) {
             ?? $refund['requested_refund_amount']
             ?? 0
         );
+        $nonRefundableFeeAmount = bv_order_refund_round_money(
+            $refund['fee_loss_amount']
+            ?? (
+                bv_order_refund_round_money($refund['platform_fee_loss'] ?? 0)
+                + bv_order_refund_round_money($refund['gateway_fee_loss'] ?? 0)
+            )
+        );
+        $finalRefundStatus = strtolower(trim((string)($refund['status'] ?? '')));
+        $refundCode = trim((string)($refund['refund_code'] ?? ('RFN-' . $refundId)));
+        if ($refundCode === '') {
+            $refundCode = 'RFN-' . $refundId;
+        }
 
         $currency = trim((string)($refund['currency'] ?? $order['currency'] ?? 'USD'));
         if ($currency === '') {
             $currency = 'USD';
         }
-
         $siteName = defined('APP_NAME') ? trim((string)APP_NAME) : '';
         if ($siteName === '') {
             $siteName = 'Bettavaro';
@@ -1803,11 +1698,15 @@ if (!function_exists('bv_refund_notification_context')) {
 
         return [
             'refund_id' => $refundId,
-            'order_id' => $orderId,
+           'order_id' => $orderId,
             'order_code' => $orderCode,
+            'refund_code' => $refundCode,
             'refund_reason_text' => trim((string)($refund['refund_reason_text'] ?? '')),
             'requested_refund_amount' => $requestedRefundAmount,
+            'approved_refund_amount' => $approvedRefundAmount,
+            'non_refundable_fee_amount' => $nonRefundableFeeAmount,
             'actual_refunded_amount' => $actualRefundedAmount,
+            'final_refund_status' => $finalRefundStatus,
             'currency' => $currency,
             'buyer_email' => $buyerEmail,
             'buyer_name' => $buyerName,
@@ -1830,13 +1729,23 @@ if (!function_exists('bv_refund_notification_build_payloads')) {
         $refundId = (int)($ctx['refund_id'] ?? 0);
         $orderId = (int)($ctx['order_id'] ?? 0);
         $orderCode = (string)($ctx['order_code'] ?? ('ORDER-' . $orderId));
+        $refundCode = (string)($ctx['refund_code'] ?? ('RFN-' . $refundId));
         $siteName = (string)($ctx['site_name'] ?? 'Bettavaro');
         $currency = (string)($ctx['currency'] ?? 'USD');
+        $requestedAmount = (float)($ctx['requested_refund_amount'] ?? 0);
+        $approvedAmount = (float)($ctx['approved_refund_amount'] ?? $requestedAmount);
+        $nonRefundableFeeAmount = (float)($ctx['non_refundable_fee_amount'] ?? 0);
+        $actualRefundedAmount = (float)($ctx['actual_refunded_amount'] ?? 0);
+        $finalRefundStatus = trim((string)($ctx['final_refund_status'] ?? $event));
         $amount = $event === 'completed'
-            ? (float)($ctx['actual_refunded_amount'] ?? 0)
-            : (float)($ctx['requested_refund_amount'] ?? 0);
+            ? $actualRefundedAmount
+            : $requestedAmount;
 
         $amountLine = number_format($amount, 2) . ' ' . $currency;
+        $requestedAmountLine = number_format($requestedAmount, 2) . ' ' . $currency;
+        $approvedAmountLine = number_format($approvedAmount, 2) . ' ' . $currency;
+        $nonRefundableFeeLine = number_format($nonRefundableFeeAmount, 2) . ' ' . $currency;
+        $actualRefundedAmountLine = number_format($actualRefundedAmount, 2) . ' ' . $currency;
         $reason = trim((string)($ctx['refund_reason_text'] ?? ''));
         $dashboardUrl = (string)($ctx['dashboard_url'] ?? '/account/refunds');
         $detailUrl = (string)($ctx['detail_url'] ?? '/account/refunds/' . $refundId);
@@ -1846,37 +1755,69 @@ if (!function_exists('bv_refund_notification_build_payloads')) {
         if ($event === 'request') {
             $buyerSubject = 'Your Refund Request Has Been Submitted – Order #' . $orderCode;
             $sellerSubject = 'New Refund Request – Order #' . $orderCode;
-        } else {
-            $buyerSubject = 'Refund Completed – Order #' . $orderCode;
-            $sellerSubject = 'Refund Processed – Order #' . $orderCode;
+       } else {
+            $buyerSubject = 'Final Refund Summary – Order #' . $orderCode;
+            $sellerSubject = 'Final Refund Summary – Order #' . $orderCode;
         }
 
-        $baseText = [
-            $siteName,
-            'Order: #' . $orderCode,
-            'Amount: ' . $amountLine,
-        ];
-        if ($event === 'request' && $reason !== '') {
-            $baseText[] = 'Reason: ' . $reason;
+        if ($event === 'completed') {
+            $baseText = [
+                $siteName,
+                'Final refund result for your order:',
+                'Refund code: ' . $refundCode,
+                'Order code: #' . $orderCode,
+                'Requested refund amount: ' . $requestedAmountLine,
+                'Approved refund amount: ' . $approvedAmountLine,
+                'Fee deducted / non-refundable fee: ' . $nonRefundableFeeLine,
+                'Actual refunded amount: ' . $actualRefundedAmountLine,
+                'Final refund status: ' . $finalRefundStatus,
+                'Refund detail link: ' . $detailUrl,
+            ];
+        } else {
+            $baseText = [
+                $siteName,
+                'Order: #' . $orderCode,
+                'Amount: ' . $amountLine,
+            ];
+            if ($reason !== '') {
+                $baseText[] = 'Reason: ' . $reason;
+            }
+            $baseText[] = 'Refund details: ' . $detailUrl;
+            $baseText[] = 'Dashboard: ' . $dashboardUrl;
         }
-        $baseText[] = 'Refund details: ' . $detailUrl;
-        $baseText[] = 'Dashboard: ' . $dashboardUrl;
+
 
         $buyerEmail = trim((string)($ctx['buyer_email'] ?? ''));
         $payloads = [];
         if ($buyerEmail !== '' && filter_var($buyerEmail, FILTER_VALIDATE_EMAIL)) {
-            $buyerText = "Hello " . (string)($ctx['buyer_name'] ?? 'Customer') . ",
+          $buyerText = "Hello " . (string)($ctx['buyer_name'] ?? 'Customer') . ",
 
 " . implode("
 ", $baseText);
-            $buyerHtml = '<p>Hello ' . htmlspecialchars((string)($ctx['buyer_name'] ?? 'Customer'), ENT_QUOTES, 'UTF-8') . ',</p>'
-                . '<p>' . htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8') . '</p>'
-                . '<p>Order: <strong>#' . htmlspecialchars($orderCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
-                . 'Amount: <strong>' . htmlspecialchars($amountLine, ENT_QUOTES, 'UTF-8') . '</strong>'
-                . ($event === 'request' && $reason !== '' ? '<br>Reason: ' . htmlspecialchars($reason, ENT_QUOTES, 'UTF-8') : '')
-                . '</p>'
-                . '<p><a href="' . htmlspecialchars($detailUrl, ENT_QUOTES, 'UTF-8') . '">View refund details</a><br>'
-                . '<a href="' . htmlspecialchars($dashboardUrl, ENT_QUOTES, 'UTF-8') . '">Open dashboard</a></p>';
+            if ($event === 'completed') {
+                $buyerHtml = '<p>Hello ' . htmlspecialchars((string)($ctx['buyer_name'] ?? 'Customer'), ENT_QUOTES, 'UTF-8') . ',</p>'
+                    . '<p>' . htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8') . '</p>'
+                    . '<p><strong>Final refund result for your order:</strong><br>'
+                    . 'Refund code: <strong>' . htmlspecialchars($refundCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Order code: <strong>#' . htmlspecialchars($orderCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Requested refund amount: <strong>' . htmlspecialchars($requestedAmountLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Approved refund amount: <strong>' . htmlspecialchars($approvedAmountLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Fee deducted / non-refundable fee: <strong>' . htmlspecialchars($nonRefundableFeeLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Actual refunded amount: <strong>' . htmlspecialchars($actualRefundedAmountLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Final refund status: <strong>' . htmlspecialchars($finalRefundStatus, ENT_QUOTES, 'UTF-8') . '</strong>'
+                    . '</p>'
+                    . '<p><a href="' . htmlspecialchars($detailUrl, ENT_QUOTES, 'UTF-8') . '">View final refund details</a></p>';
+            } else {
+                $buyerHtml = '<p>Hello ' . htmlspecialchars((string)($ctx['buyer_name'] ?? 'Customer'), ENT_QUOTES, 'UTF-8') . ',</p>'
+                    . '<p>' . htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8') . '</p>'
+                    . '<p>Order: <strong>#' . htmlspecialchars($orderCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Amount: <strong>' . htmlspecialchars($amountLine, ENT_QUOTES, 'UTF-8') . '</strong>'
+                    . ($reason !== '' ? '<br>Reason: ' . htmlspecialchars($reason, ENT_QUOTES, 'UTF-8') : '')
+                    . '</p>'
+                    . '<p><a href="' . htmlspecialchars($detailUrl, ENT_QUOTES, 'UTF-8') . '">View refund details</a><br>'
+                    . '<a href="' . htmlspecialchars($dashboardUrl, ENT_QUOTES, 'UTF-8') . '">Open dashboard</a></p>';
+            }
+
 
              $payloads[] = [
                 'recipient_type' => 'buyer',
@@ -1909,30 +1850,60 @@ if (!function_exists('bv_refund_notification_build_payloads')) {
                 continue;
             }
 
-          $sellerBaseText = [
-                $siteName,
-                'Order: #' . $orderCode,
-                'Amount: ' . $amountLine,
-            ];
-            if ($event === 'request' && $reason !== '') {
-                $sellerBaseText[] = 'Reason: ' . $reason;
+            if ($event === 'completed') {
+                $sellerBaseText = [
+                    $siteName,
+                    'Final refund result for your order:',
+                    'Refund code: ' . $refundCode,
+                    'Order code: #' . $orderCode,
+                    'Requested refund amount: ' . $requestedAmountLine,
+                    'Approved refund amount: ' . $approvedAmountLine,
+                    'Fee deducted / non-refundable fee: ' . $nonRefundableFeeLine,
+                    'Actual refunded amount: ' . $actualRefundedAmountLine,
+                    'Final refund status: ' . $finalRefundStatus,
+                    'Refund detail link: ' . $sellerDetailUrl,
+                ];
+            } else {
+                $sellerBaseText = [
+                    $siteName,
+                    'Order: #' . $orderCode,
+                    'Amount: ' . $amountLine,
+                ];
+                if ($reason !== '') {
+                    $sellerBaseText[] = 'Reason: ' . $reason;
+                }
+                $sellerBaseText[] = 'Refund details: ' . $sellerDetailUrl;
+                $sellerBaseText[] = 'Dashboard: ' . $sellerDashboardUrl;
             }
-            $sellerBaseText[] = 'Refund details: ' . $sellerDetailUrl;
-            $sellerBaseText[] = 'Dashboard: ' . $sellerDashboardUrl;
 
             $sellerText = "Hello Seller,
 
 " . implode("
 ", $sellerBaseText);
-            $sellerHtml = '<p>Hello Seller,</p>'
-                . '<p>' . htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8') . '</p>'
-                . '<p>Order: <strong>#' . htmlspecialchars($orderCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
-                . 'Amount: <strong>' . htmlspecialchars($amountLine, ENT_QUOTES, 'UTF-8') . '</strong>'
-                . ($event === 'request' && $reason !== '' ? '<br>Reason: ' . htmlspecialchars($reason, ENT_QUOTES, 'UTF-8') : '')
-                . '</p>'
-                . '<p><a href="' . htmlspecialchars($sellerDetailUrl, ENT_QUOTES, 'UTF-8') . '">View refund details</a><br>'
-                . '<a href="' . htmlspecialchars($sellerDashboardUrl, ENT_QUOTES, 'UTF-8') . '">Open dashboard</a></p>';
-
+            if ($event === 'completed') {
+                $sellerHtml = '<p>Hello Seller,</p>'
+                    . '<p>' . htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8') . '</p>'
+                    . '<p><strong>Final refund result for your order:</strong><br>'
+                    . 'Refund code: <strong>' . htmlspecialchars($refundCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Order code: <strong>#' . htmlspecialchars($orderCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Requested refund amount: <strong>' . htmlspecialchars($requestedAmountLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Approved refund amount: <strong>' . htmlspecialchars($approvedAmountLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Fee deducted / non-refundable fee: <strong>' . htmlspecialchars($nonRefundableFeeLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Actual refunded amount: <strong>' . htmlspecialchars($actualRefundedAmountLine, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Final refund status: <strong>' . htmlspecialchars($finalRefundStatus, ENT_QUOTES, 'UTF-8') . '</strong>'
+                    . '</p>'
+                    . '<p><a href="' . htmlspecialchars($sellerDetailUrl, ENT_QUOTES, 'UTF-8') . '">View final refund details</a></p>';
+            } else {
+                $sellerHtml = '<p>Hello Seller,</p>'
+                    . '<p>' . htmlspecialchars($siteName, ENT_QUOTES, 'UTF-8') . '</p>'
+                    . '<p>Order: <strong>#' . htmlspecialchars($orderCode, ENT_QUOTES, 'UTF-8') . '</strong><br>'
+                    . 'Amount: <strong>' . htmlspecialchars($amountLine, ENT_QUOTES, 'UTF-8') . '</strong>'
+                    . ($reason !== '' ? '<br>Reason: ' . htmlspecialchars($reason, ENT_QUOTES, 'UTF-8') : '')
+                    . '</p>'
+                    . '<p><a href="' . htmlspecialchars($sellerDetailUrl, ENT_QUOTES, 'UTF-8') . '">View refund details</a><br>'
+                    . '<a href="' . htmlspecialchars($sellerDashboardUrl, ENT_QUOTES, 'UTF-8') . '">Open dashboard</a></p>';
+            }
+			
             $payloads[] = [
                 'recipient_type' => 'seller',
                 'email' => $sellerEmail,
@@ -2915,21 +2886,6 @@ if (!function_exists('bv_order_refund_mark_refunded')) {
              $refund = bv_order_refund_query_one('SELECT * FROM order_refunds WHERE id = :id LIMIT 1 FOR UPDATE', ['id' => $refundId]) ?? $refund;
 if (strtolower((string)($refund['status'] ?? '')) === 'refunded') {
     bv_order_refund_commit();
-
-    // 🔥 ยิง completed mail แม้เป็น re-entry
-    try {
-        bv_order_refund_after_completed((int)$refundId);
-        bv_refund_queue_notifications((int)$refundId, 'completed');
-    } catch (Throwable $notifyError) {
-        if (function_exists('bv_order_refund_debug_log')) {
-            bv_order_refund_debug_log('refund_notification_queue_failed', [
-                'refund_id' => (int)$refundId,
-                'event' => 'completed',
-                'error' => $notifyError->getMessage(),
-            ]);
-        }
-    }
-
     return bv_order_refund_get_by_id($refundId) ?? [];
 }
             $approved = bv_order_refund_validate_amount($refund['approved_refund_amount'] ?? 0); 
